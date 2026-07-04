@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from polybot import __version__
-from polybot import clob, discovery
+from polybot import clob, discovery, price_feed
 from polybot.config import BotConfig
 from polybot.gamma import GammaClient
 
@@ -62,6 +62,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include closed markets when active markets are unavailable.",
     )
+
+    price_parser = subparsers.add_parser(
+        "price",
+        help="Fetch public crypto spot prices.",
+    )
+    price_parser.add_argument(
+        "symbols",
+        nargs="+",
+        choices=tuple(symbol.lower() for symbol in price_feed.SUPPORTED_SYMBOLS)
+        + price_feed.SUPPORTED_SYMBOLS,
+        help="Crypto symbols to fetch, for example BTC ETH.",
+    )
     return parser
 
 
@@ -106,6 +118,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         books = clob.enrich_markets_with_books(markets, clob.CLOBClient())
         _print_books_table(books)
+        return 0
+
+    if args.command == "price":
+        feed = price_feed.build_default_price_feed()
+        points: list[price_feed.PricePoint] = []
+        for symbol in args.symbols:
+            points.append(feed.get_price(symbol))
+        _print_price_table(points)
         return 0
 
     parser.print_help()
@@ -212,6 +232,27 @@ def _fmt_size(value: float | None) -> str:
     if value is None:
         return ""
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _print_price_table(points: Sequence[price_feed.PricePoint]) -> None:
+    headers = ("symbol", "price", "timestamp UTC", "source")
+    rows = [
+        (
+            point.symbol,
+            f"{point.price:.8f}".rstrip("0").rstrip("."),
+            point.timestamp_utc,
+            point.source,
+        )
+        for point in points
+    ]
+    widths = [
+        max(len(str(row[index])) for row in (headers, *rows)) if rows else len(header)
+        for index, header in enumerate(headers)
+    ]
+    print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    print("-+-".join("-" * width for width in widths))
+    for row in rows:
+        print(" | ".join(str(value).ljust(widths[index]) for index, value in enumerate(row)))
 
 
 if __name__ == "__main__":
