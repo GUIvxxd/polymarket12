@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from polybot import __version__
-from polybot import clob, dashboard, discovery, ledger, live, price_feed, resolver
+from polybot import analysis, clob, dashboard, discovery, ledger, live, price_feed, resolver
 from polybot.config import BotConfig
 from polybot.gamma import GammaClient
 
@@ -150,6 +150,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(BotConfig().db_path),
         help="SQLite ledger path.",
     )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Analyze paper-trading ledger results.",
+    )
+    analyze_parser.add_argument(
+        "--db",
+        default=str(BotConfig().db_path),
+        help="SQLite ledger path.",
+    )
+    analyze_parser.add_argument(
+        "--starting-balance",
+        type=float,
+        default=0.0,
+        help="Starting paper balance for balance and drawdown metrics.",
+    )
+    analyze_parser.add_argument(
+        "--report-dir",
+        default=str(analysis.DEFAULT_REPORT_DIR),
+        help="Directory for CSV report exports.",
+    )
+    analyze_parser.add_argument(
+        "--no-export",
+        action="store_true",
+        help="Print metrics without writing CSV files.",
+    )
     return parser
 
 
@@ -242,6 +268,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             runner.run(on_iteration=terminal_dashboard.render)
         except KeyboardInterrupt:
             print("Stopped paper loop.")
+        return 0
+
+    if args.command == "analyze":
+        report = analysis.analyze_ledger(
+            ledger.SQLiteLedger(Path(args.db)),
+            starting_balance=args.starting_balance,
+        )
+        _print_analysis_report(report)
+        if not args.no_export:
+            paths = analysis.export_report_csv(report, Path(args.report_dir))
+            print()
+            print("CSV reports:")
+            for path in paths:
+                print(str(path))
         return 0
 
     parser.print_help()
@@ -449,6 +489,75 @@ def _print_resolver_summary(summary: resolver.ResolverRunSummary) -> None:
                 for index, value in enumerate(row)
             )
         )
+
+
+def _print_analysis_report(report: analysis.AnalysisReport) -> None:
+    metrics = report.metrics
+    skipped = (
+        "not tracked"
+        if metrics.skipped_trades_count is None
+        else str(metrics.skipped_trades_count)
+    )
+    rows = [
+        ("starting balance", _fmt_money(metrics.starting_balance)),
+        ("ending balance", _fmt_money(metrics.ending_balance)),
+        ("realized pnl", _fmt_money(metrics.realized_pnl)),
+        ("open pnl", _fmt_money(metrics.open_pnl)),
+        ("open risk", _fmt_money(metrics.open_risk)),
+        ("total trades", str(metrics.total_trades)),
+        ("resolved trades", str(metrics.resolved_trades)),
+        ("unresolved trades", str(metrics.unresolved_trades)),
+        ("won trades", str(metrics.won_trades)),
+        ("lost trades", str(metrics.lost_trades)),
+        ("win rate", f"{metrics.win_rate:.2%}"),
+        ("avg pnl/trade", _fmt_money(metrics.average_profit_per_trade)),
+        ("median pnl/trade", _fmt_money(metrics.median_profit_per_trade)),
+        ("max drawdown", _fmt_money(metrics.max_drawdown)),
+        ("skipped trades", skipped),
+    ]
+    _print_key_value_table("Analysis Summary", rows)
+    print()
+    _print_bucket_table("Profit By Symbol", report.profit_by_symbol)
+    print()
+    _print_bucket_table("Profit By Time-To-Expiry", report.profit_by_time_to_expiry_bucket)
+    print()
+    _print_bucket_table("Profit By Edge", report.profit_by_edge_bucket)
+
+
+def _print_key_value_table(title: str, rows: Sequence[tuple[str, str]]) -> None:
+    print(title)
+    widths = [
+        max(len(str(row[index])) for row in (("metric", "value"), *rows))
+        for index in range(2)
+    ]
+    print("metric".ljust(widths[0]) + " | " + "value".ljust(widths[1]))
+    print("-" * widths[0] + "-+-" + "-" * widths[1])
+    for metric, value in rows:
+        print(metric.ljust(widths[0]) + " | " + value.ljust(widths[1]))
+
+
+def _print_bucket_table(title: str, rows: Sequence[analysis.BucketMetric]) -> None:
+    print(title)
+    headers = ("bucket", "trades", "realized pnl", "avg pnl")
+    table_rows = [
+        (
+            item.bucket,
+            str(item.trade_count),
+            _fmt_money(item.realized_pnl),
+            _fmt_money(item.average_pnl),
+        )
+        for item in rows
+    ]
+    if not table_rows:
+        table_rows = [("none", "0", "$0.00", "$0.00")]
+    widths = [
+        max(len(str(row[index])) for row in (headers, *table_rows))
+        for index in range(len(headers))
+    ]
+    print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    print("-+-".join("-" * width for width in widths))
+    for row in table_rows:
+        print(" | ".join(str(value).ljust(widths[index]) for index, value in enumerate(row)))
 
 
 if __name__ == "__main__":
