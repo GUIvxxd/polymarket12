@@ -32,6 +32,27 @@ def make_trade(**overrides) -> ledger.PaperTrade:
     return ledger.PaperTrade(**values)
 
 
+def make_skip(**overrides) -> ledger.SkippedSignalRecord:
+    values = {
+        "skip_id": "skip-1",
+        "created_at_utc": "2026-07-06T12:00:00Z",
+        "market_slug": "btc-updown-5m-1",
+        "condition_id": "0xcondition",
+        "asset": "BTC",
+        "side": "BUY_UP",
+        "outcome": "Up",
+        "token_id": "token-1",
+        "reason": "Up edge 0.0500 below 0.0800",
+        "fair_probability": 0.9,
+        "ask_price": 0.85,
+        "ask_size": 50.0,
+        "edge": 0.05,
+        "seconds_remaining": 60.0,
+    }
+    values.update(overrides)
+    return ledger.SkippedSignalRecord(**values)
+
+
 def test_win_rate_calculation() -> None:
     assert analysis.calculate_win_rate(3, 1) == 0.75
     assert analysis.calculate_win_rate(0, 0) == 0.0
@@ -90,6 +111,17 @@ def test_analysis_metrics_and_bucket_aggregation() -> None:
     assert expiry_buckets == {"unknown"}
 
 
+def test_analyze_ledger_counts_skipped_signals(tmp_path) -> None:
+    store = ledger.SQLiteLedger(tmp_path / "paper_trades.sqlite")
+
+    store.record_trade(make_trade(trade_id="btc-win", pnl=3.0))
+    store.record_signal_skip(make_skip())
+
+    report = analysis.analyze_ledger(store, starting_balance=100.0)
+
+    assert report.metrics.skipped_trades_count == 1
+
+
 def test_export_report_csv_writes_summary_and_bucket_files(tmp_path) -> None:
     report = analysis.analyze_trades(
         [make_trade(trade_id="btc-win", market_slug="btc-updown-5m-1", pnl=3.0)],
@@ -144,4 +176,3 @@ def test_cli_parser_includes_analyze_command() -> None:
 
     assert args.command == "analyze"
     assert args.starting_balance == 100.0
-

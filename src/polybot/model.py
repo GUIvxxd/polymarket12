@@ -146,27 +146,90 @@ class Signal:
     reason: str
 
 
+@dataclass(frozen=True)
+class SignalRejection:
+    market_slug: str
+    condition_id: str
+    side: str | None
+    outcome: str | None
+    token_id: str | None
+    reason: str
+    fair_probability: float | None = None
+    ask_price: float | None = None
+    ask_size: float | None = None
+    edge: float | None = None
+    seconds_remaining: float | None = None
+
+
+@dataclass(frozen=True)
+class SignalEvaluation:
+    signal: Signal | None
+    rejections: list[SignalRejection]
+
+
 def decide_signal(
     market: CryptoUpDownMarket,
     orderbook: Sequence[MarketTokenBook],
     price_point: PricePoint,
     model_config: ModelConfig,
 ) -> Signal | None:
+    return evaluate_signal(market, orderbook, price_point, model_config).signal
+
+
+def evaluate_signal(
+    market: CryptoUpDownMarket,
+    orderbook: Sequence[MarketTokenBook],
+    price_point: PricePoint,
+    model_config: ModelConfig,
+) -> SignalEvaluation:
     if market.closed:
-        return None
+        return SignalEvaluation(
+            signal=None,
+            rejections=[_market_rejection(market, "market closed")],
+        )
 
     if not market.active:
-        return None
+        return SignalEvaluation(
+            signal=None,
+            rejections=[_market_rejection(market, "market inactive")],
+        )
 
     seconds_remaining = _seconds_remaining(market, model_config)
     if seconds_remaining is None:
-        return None
+        return SignalEvaluation(
+            signal=None,
+            rejections=[_market_rejection(market, "seconds remaining unavailable")],
+        )
 
     if seconds_remaining < model_config.min_seconds_remaining:
-        return None
+        return SignalEvaluation(
+            signal=None,
+            rejections=[
+                _market_rejection(
+                    market,
+                    (
+                        f"seconds remaining {seconds_remaining:.2f} below "
+                        f"{model_config.min_seconds_remaining:.2f}"
+                    ),
+                    seconds_remaining=seconds_remaining,
+                )
+            ],
+        )
 
     if seconds_remaining > model_config.max_seconds_remaining:
-        return None
+        return SignalEvaluation(
+            signal=None,
+            rejections=[
+                _market_rejection(
+                    market,
+                    (
+                        f"seconds remaining {seconds_remaining:.2f} above "
+                        f"{model_config.max_seconds_remaining:.2f}"
+                    ),
+                    seconds_remaining=seconds_remaining,
+                )
+            ],
+        )
 
     estimate = _select_model(model_config).estimate(
         start_price=model_config.start_price,
@@ -174,8 +237,8 @@ def decide_signal(
         seconds_remaining=seconds_remaining,
     )
 
-    candidates = [
-        _candidate_signal(
+    evaluated_candidates = [
+        _evaluate_candidate_signal(
             side=BUY_UP,
             outcome="Up",
             fair_probability=estimate.fair_up_probability,
@@ -185,7 +248,7 @@ def decide_signal(
             seconds_remaining=seconds_remaining,
             model_reason=estimate.reason,
         ),
-        _candidate_signal(
+        _evaluate_candidate_signal(
             side=BUY_DOWN,
             outcome="Down",
             fair_probability=estimate.fair_down_probability,
@@ -196,11 +259,17 @@ def decide_signal(
             model_reason=estimate.reason,
         ),
     ]
-    valid = [candidate for candidate in candidates if candidate is not None]
-    if not valid:
-        return None
+    signals = [signal for signal, _rejection in evaluated_candidates if signal is not None]
+    rejections = [
+        rejection for _signal, rejection in evaluated_candidates if rejection is not None
+    ]
+    if not signals:
+        return SignalEvaluation(signal=None, rejections=rejections)
 
-    return max(valid, key=lambda signal: signal.edge)
+    return SignalEvaluation(
+        signal=max(signals, key=lambda signal: signal.edge),
+        rejections=rejections,
+    )
 
 
 def _select_model(model_config: ModelConfig) -> FairValueModel:
@@ -218,7 +287,7 @@ def _select_model(model_config: ModelConfig) -> FairValueModel:
     )
 
 
-def _candidate_signal(
+def _evaluate_candidate_signal(
     *,
     side: str,
     outcome: str,
@@ -228,36 +297,155 @@ def _candidate_signal(
     model_config: ModelConfig,
     seconds_remaining: float,
     model_reason: str,
-) -> Signal | None:
+) -> tuple[Signal | None, SignalRejection | None]:
     book = _find_book(orderbook, outcome)
-    if book is None or not book.book.available:
-        return None
+    if book is None:
+        return (
+            None,
+            _candidate_rejection(
+                market=market,
+                side=side,
+                outcome=outcome,
+                token_id=None,
+                reason=f"{outcome} book unavailable",
+                fair_probability=fair_probability,
+                seconds_remaining=seconds_remaining,
+            ),
+        )
+
+    if not book.book.available:
+        reason = f"{outcome} book unavailable"
+        if book.book.error:
+            reason = f"{reason}: {book.book.error}"
+        return (
+            None,
+            _candidate_rejection(
+                market=market,
+                side=side,
+                outcome=outcome,
+                token_id=book.token_id,
+                reason=reason,
+                fair_probability=fair_probability,
+                seconds_remaining=seconds_remaining,
+            ),
+        )
 
     ask_price = book.book.best_ask
     ask_size = book.book.best_ask_size
     if ask_price is None or ask_size is None:
-        return None
+        return (
+            None,
+            _candidate_rejection(
+                market=market,
+                side=side,
+                outcome=book.outcome,
+                token_id=book.token_id,
+                reason=f"{book.outcome} missing best ask",
+                fair_probability=fair_probability,
+                ask_price=ask_price,
+                ask_size=ask_size,
+                seconds_remaining=seconds_remaining,
+            ),
+        )
 
     if ask_size < model_config.min_liquidity:
-        return None
+        return (
+            None,
+            _candidate_rejection(
+                market=market,
+                side=side,
+                outcome=book.outcome,
+                token_id=book.token_id,
+                reason=(
+                    f"{book.outcome} ask size {ask_size:.4f} below "
+                    f"{model_config.min_liquidity:.4f}"
+                ),
+                fair_probability=fair_probability,
+                ask_price=ask_price,
+                ask_size=ask_size,
+                seconds_remaining=seconds_remaining,
+            ),
+        )
 
     edge = fair_probability - ask_price
     if edge < model_config.min_edge:
-        return None
+        return (
+            None,
+            _candidate_rejection(
+                market=market,
+                side=side,
+                outcome=book.outcome,
+                token_id=book.token_id,
+                reason=f"{book.outcome} edge {edge:.4f} below {model_config.min_edge:.4f}",
+                fair_probability=fair_probability,
+                ask_price=ask_price,
+                ask_size=ask_size,
+                edge=edge,
+                seconds_remaining=seconds_remaining,
+            ),
+        )
 
-    return Signal(
-        side=side,
+    return (
+        Signal(
+            side=side,
+            market_slug=market.slug,
+            condition_id=market.condition_id,
+            token_id=book.token_id,
+            outcome=book.outcome,
+            fair_probability=fair_probability,
+            ask_price=ask_price,
+            ask_size=ask_size,
+            edge=edge,
+            suggested_stake=model_config.suggested_stake,
+            seconds_remaining=seconds_remaining,
+            reason=f"{model_reason}; edge {edge:.4f} >= {model_config.min_edge:.4f}",
+        ),
+        None,
+    )
+
+
+def _market_rejection(
+    market: CryptoUpDownMarket,
+    reason: str,
+    *,
+    seconds_remaining: float | None = None,
+) -> SignalRejection:
+    return SignalRejection(
         market_slug=market.slug,
         condition_id=market.condition_id,
-        token_id=book.token_id,
-        outcome=book.outcome,
+        side=None,
+        outcome=None,
+        token_id=None,
+        reason=reason,
+        seconds_remaining=seconds_remaining,
+    )
+
+
+def _candidate_rejection(
+    *,
+    market: CryptoUpDownMarket,
+    side: str,
+    outcome: str,
+    token_id: str | None,
+    reason: str,
+    fair_probability: float | None,
+    ask_price: float | None = None,
+    ask_size: float | None = None,
+    edge: float | None = None,
+    seconds_remaining: float | None = None,
+) -> SignalRejection:
+    return SignalRejection(
+        market_slug=market.slug,
+        condition_id=market.condition_id,
+        side=side,
+        outcome=outcome,
+        token_id=token_id,
+        reason=reason,
         fair_probability=fair_probability,
         ask_price=ask_price,
         ask_size=ask_size,
         edge=edge,
-        suggested_stake=model_config.suggested_stake,
         seconds_remaining=seconds_remaining,
-        reason=f"{model_reason}; edge {edge:.4f} >= {model_config.min_edge:.4f}",
     )
 
 
@@ -318,4 +506,3 @@ def _normal_cdf(value: float) -> float:
 
 def _clamp_probability(value: float) -> float:
     return min(max(value, 0.5), 1.0)
-

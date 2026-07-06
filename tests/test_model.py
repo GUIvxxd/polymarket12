@@ -11,6 +11,7 @@ from polybot.model import (
     NearExpiryThresholdModel,
     VolatilityProbabilityModel,
     decide_signal,
+    evaluate_signal,
 )
 from polybot.price_feed import PricePoint
 
@@ -219,3 +220,42 @@ def test_decide_signal_returns_none_when_market_is_closed() -> None:
 
     assert signal is None
 
+
+def test_evaluate_signal_reports_edge_and_liquidity_rejections() -> None:
+    evaluation = evaluate_signal(
+        make_market(),
+        make_books(up_ask=0.70, up_ask_size=2.0, down_ask=0.99),
+        make_price(101.0),
+        ModelConfig(
+            start_price=100.0,
+            min_edge=0.08,
+            min_liquidity=5.0,
+            min_bps_distance=5.0,
+            seconds_remaining=60.0,
+        ),
+    )
+
+    reasons = [rejection.reason for rejection in evaluation.rejections]
+
+    assert evaluation.signal is None
+    assert any("ask size" in reason for reason in reasons)
+    assert any("edge" in reason for reason in reasons)
+    assert {rejection.side for rejection in evaluation.rejections} == {BUY_UP, BUY_DOWN}
+
+
+def test_evaluate_signal_reports_market_level_rejection() -> None:
+    evaluation = evaluate_signal(
+        make_market(active=False),
+        make_books(),
+        make_price(101.0),
+        ModelConfig(
+            start_price=100.0,
+            min_edge=0.08,
+            min_liquidity=5.0,
+            seconds_remaining=60.0,
+        ),
+    )
+
+    assert evaluation.signal is None
+    assert len(evaluation.rejections) == 1
+    assert evaluation.rejections[0].reason == "market inactive"

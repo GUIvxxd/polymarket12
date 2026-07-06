@@ -56,13 +56,18 @@ def analyze_ledger(
     *,
     starting_balance: float = 0.0,
 ) -> AnalysisReport:
-    return analyze_trades(store.list_trades(), starting_balance=starting_balance)
+    return analyze_trades(
+        store.list_trades(),
+        starting_balance=starting_balance,
+        skipped_trades_count=store.count_signal_skips(),
+    )
 
 
 def analyze_trades(
     trades: Sequence[ledger.PaperTrade],
     *,
     starting_balance: float = 0.0,
+    skipped_trades_count: int | None = None,
 ) -> AnalysisReport:
     resolved = [trade for trade in trades if trade.status in RESOLVED_STATUSES]
     open_trades = [trade for trade in trades if trade.status == ledger.OPEN]
@@ -87,7 +92,7 @@ def analyze_trades(
         average_profit_per_trade=(realized_pnl / resolved_count if resolved_count else 0.0),
         median_profit_per_trade=(float(median(pnl_values)) if pnl_values else 0.0),
         max_drawdown=calculate_max_drawdown(resolved, starting_balance=starting_balance),
-        skipped_trades_count=None,
+        skipped_trades_count=skipped_trades_count,
     )
 
     return AnalysisReport(
@@ -243,4 +248,3 @@ def _write_bucket_csv(metrics: Sequence[BucketMetric], path: Path) -> Path:
 
 def _trade_sort_key(trade: ledger.PaperTrade) -> tuple[str, str]:
     return (trade.resolved_at_utc or trade.created_at_utc, trade.trade_id)
-

@@ -125,6 +125,9 @@ def test_one_loop_iteration_creates_no_trade_for_non_qualifying_signal(tmp_path)
     assert result.markets_checked == 1
     assert len(result.signals) == 0
     assert len(result.trades) == 0
+    assert len(result.skipped_signals) >= 1
+    assert any("edge" in skip.reason for skip in result.skipped_signals)
+    assert runner.ledger.count_signal_skips() == len(result.skipped_signals)
     assert result.ledger_summary.total_trades == 0
 
 

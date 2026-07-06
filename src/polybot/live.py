@@ -5,15 +5,17 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from polybot import clob, discovery
 from polybot.gamma import GammaClient
-from polybot.ledger import LedgerSummary, PaperTrade, SQLiteLedger
-from polybot.model import ModelConfig, Signal, decide_signal
+from polybot.ledger import LedgerSummary, PaperTrade, SQLiteLedger, SkippedSignalRecord
+from polybot.model import ModelConfig, Signal, SignalRejection, evaluate_signal
 from polybot.paper_trader import PaperTrader, PaperTraderConfig
-from polybot.price_feed import PriceFeed, PricePoint, build_default_price_feed
+from polybot.price_feed import PriceFeed, PricePoint, build_default_price_feed, timestamp_utc
 from polybot.resolver import PaperTradeResolver, ResolverRunSummary
 
 
@@ -41,8 +43,12 @@ class LivePaperConfig:
 
 @dataclass(frozen=True)
 class SkippedSignal:
-    signal: Signal
+    market_slug: str
+    side: str | None
+    outcome: str | None
     reason: str
+    edge: float | None
+    seconds_remaining: float | None
 
 
 @dataclass(frozen=True)
@@ -158,21 +164,28 @@ class LivePaperRunner:
                 continue
 
             books_checked += len(market_books)
-            signal = decide_signal(
+            model_config = ModelConfig(
+                start_price=reference_price,
+                min_edge=self.config.min_edge,
+                min_liquidity=self.config.min_liquidity,
+                suggested_stake=self.config.stake,
+                min_seconds_remaining=self.config.min_seconds_remaining,
+                max_seconds_remaining=self.config.max_seconds_remaining,
+                min_bps_distance=self.config.min_bps_distance,
+                leading_probability=self.config.leading_probability,
+            )
+            evaluation = evaluate_signal(
                 market,
                 market_books,
                 price_point,
-                ModelConfig(
-                    start_price=reference_price,
-                    min_edge=self.config.min_edge,
-                    min_liquidity=self.config.min_liquidity,
-                    suggested_stake=self.config.stake,
-                    min_seconds_remaining=self.config.min_seconds_remaining,
-                    max_seconds_remaining=self.config.max_seconds_remaining,
-                    min_bps_distance=self.config.min_bps_distance,
-                    leading_probability=self.config.leading_probability,
-                ),
+                model_config,
             )
+            for rejection in evaluation.rejections:
+                skipped = self._record_signal_rejection(market, rejection)
+                skipped_signals.append(skipped)
+                messages.append(_skip_message(skipped))
+
+            signal = evaluation.signal
             if signal is None:
                 continue
 
@@ -181,9 +194,13 @@ class LivePaperRunner:
             if trade_result.created and trade_result.trade is not None:
                 trades.append(trade_result.trade)
             else:
-                skipped_signals.append(
-                    SkippedSignal(signal, trade_result.skipped_reason or "trade skipped")
+                skipped = self._record_trade_skip(
+                    market,
+                    signal,
+                    trade_result.skipped_reason or "trade skipped",
                 )
+                skipped_signals.append(skipped)
+                messages.append(_skip_message(skipped))
 
         resolver_summary = self.trade_resolver.resolve_open_trades()
         ledger_summary = self.ledger.summarize()
@@ -221,6 +238,55 @@ class LivePaperRunner:
             return None
         return extract_reference_price(payload)
 
+    def _record_signal_rejection(
+        self,
+        market: discovery.CryptoUpDownMarket,
+        rejection: SignalRejection,
+    ) -> SkippedSignal:
+        record = SkippedSignalRecord(
+            skip_id=_skip_id(),
+            created_at_utc=timestamp_utc(_utc_now()),
+            market_slug=rejection.market_slug,
+            condition_id=rejection.condition_id,
+            asset=market.asset,
+            side=rejection.side,
+            outcome=rejection.outcome,
+            token_id=rejection.token_id,
+            reason=rejection.reason,
+            fair_probability=rejection.fair_probability,
+            ask_price=rejection.ask_price,
+            ask_size=rejection.ask_size,
+            edge=rejection.edge,
+            seconds_remaining=rejection.seconds_remaining,
+        )
+        self.ledger.record_signal_skip(record)
+        return _skipped_from_record(record)
+
+    def _record_trade_skip(
+        self,
+        market: discovery.CryptoUpDownMarket,
+        signal: Signal,
+        reason: str,
+    ) -> SkippedSignal:
+        record = SkippedSignalRecord(
+            skip_id=_skip_id(),
+            created_at_utc=timestamp_utc(_utc_now()),
+            market_slug=signal.market_slug,
+            condition_id=signal.condition_id,
+            asset=market.asset,
+            side=signal.side,
+            outcome=signal.outcome,
+            token_id=signal.token_id,
+            reason=reason,
+            fair_probability=signal.fair_probability,
+            ask_price=signal.ask_price,
+            ask_size=signal.ask_size,
+            edge=signal.edge,
+            seconds_remaining=signal.seconds_remaining,
+        )
+        self.ledger.record_signal_skip(record)
+        return _skipped_from_record(record)
+
 
 def queries_for_symbol(symbol: str) -> tuple[str, str]:
     normalized = normalize_loop_symbol(symbol)
@@ -242,6 +308,34 @@ def normalize_loop_symbol(symbol: str) -> str:
     if normalized not in SUPPORTED_LOOP_SYMBOLS:
         raise ValueError(f"Unsupported symbol {symbol!r}. Expected one of {', '.join(SUPPORTED_LOOP_SYMBOLS)}.")
     return normalized
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _skip_id() -> str:
+    return uuid4().hex
+
+
+def _skipped_from_record(record: SkippedSignalRecord) -> SkippedSignal:
+    return SkippedSignal(
+        market_slug=record.market_slug,
+        side=record.side,
+        outcome=record.outcome,
+        reason=record.reason,
+        edge=record.edge,
+        seconds_remaining=record.seconds_remaining,
+    )
+
+
+def _skip_message(skip: SkippedSignal) -> str:
+    label = "market"
+    if skip.outcome:
+        label = skip.outcome
+    if skip.side:
+        label = f"{skip.side} {label}"
+    return f"{skip.market_slug}: {label} skipped: {skip.reason}"
 
 
 def extract_reference_price(payload: object) -> float | None:

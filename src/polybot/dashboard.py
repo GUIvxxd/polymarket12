@@ -8,9 +8,9 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 
-from polybot.live import LoopIterationResult
-from polybot.model import Signal
 from polybot.ledger import PaperTrade
+from polybot.live import LoopIterationResult, SkippedSignal
+from polybot.model import Signal
 
 
 class PaperDashboard:
@@ -24,6 +24,7 @@ class PaperDashboard:
                 Group(
                     _summary_table(result),
                     _signals_table(result.signals),
+                    _skips_table(result.skipped_signals),
                     _trades_table(result.trades),
                     _messages_table(result.messages),
                 ),
@@ -41,6 +42,7 @@ def _summary_table(result: LoopIterationResult) -> Table:
     table.add_row("Markets checked", str(result.markets_checked))
     table.add_row("Books checked", str(result.books_checked))
     table.add_row("Signals", str(len(result.signals)))
+    table.add_row("Skipped signals", str(len(result.skipped_signals)))
     table.add_row("Trades created", str(len(result.trades)))
     table.add_row("Resolved this tick", str(result.resolver_summary.resolved))
     table.add_row("Total trades", str(summary.total_trades))
@@ -95,6 +97,26 @@ def _trades_table(trades: Sequence[PaperTrade]) -> Table:
     return table
 
 
+def _skips_table(skips: Sequence[SkippedSignal]) -> Table:
+    table = Table(title="Latest Skipped Signals", expand=True)
+    table.add_column("Market")
+    table.add_column("Side")
+    table.add_column("Outcome")
+    table.add_column("Edge", justify="right")
+    table.add_column("Reason")
+    for skip in skips[-8:]:
+        table.add_row(
+            skip.market_slug,
+            skip.side or "",
+            skip.outcome or "",
+            _optional_price(skip.edge),
+            skip.reason,
+        )
+    if not skips:
+        table.add_row("none", "", "", "", "")
+    return table
+
+
 def _messages_table(messages: Sequence[str]) -> Table:
     table = Table(title="Messages", expand=True)
     table.add_column("Message")
@@ -112,3 +134,8 @@ def _money(value: float) -> str:
 def _price(value: float) -> str:
     return f"{value:.4f}"
 
+
+def _optional_price(value: float | None) -> str:
+    if value is None:
+        return ""
+    return _price(value)

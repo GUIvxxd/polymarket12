@@ -41,6 +41,24 @@ class PaperTrade:
 
 
 @dataclass(frozen=True)
+class SkippedSignalRecord:
+    skip_id: str
+    created_at_utc: str
+    market_slug: str
+    condition_id: str
+    asset: str
+    side: str | None
+    outcome: str | None
+    token_id: str | None
+    reason: str
+    fair_probability: float | None
+    ask_price: float | None
+    ask_size: float | None
+    edge: float | None
+    seconds_remaining: float | None
+
+
+@dataclass(frozen=True)
 class LedgerSummary:
     total_trades: int
     open_trades: int
@@ -97,6 +115,32 @@ class SQLiteLedger:
                 ON paper_trades(status)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_signal_skips (
+                    skip_id TEXT PRIMARY KEY,
+                    created_at_utc TEXT NOT NULL,
+                    market_slug TEXT NOT NULL,
+                    condition_id TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    side TEXT,
+                    outcome TEXT,
+                    token_id TEXT,
+                    reason TEXT NOT NULL,
+                    fair_probability REAL,
+                    ask_price REAL,
+                    ask_size REAL,
+                    edge REAL,
+                    seconds_remaining REAL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_paper_signal_skips_created_at
+                ON paper_signal_skips(created_at_utc)
+                """
+            )
 
     def record_trade(self, trade: PaperTrade) -> None:
         self.initialize()
@@ -129,6 +173,32 @@ class SQLiteLedger:
                 _trade_values(trade),
             )
 
+    def record_signal_skip(self, skip: SkippedSignalRecord) -> None:
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_signal_skips (
+                    skip_id,
+                    created_at_utc,
+                    market_slug,
+                    condition_id,
+                    asset,
+                    side,
+                    outcome,
+                    token_id,
+                    reason,
+                    fair_probability,
+                    ask_price,
+                    ask_size,
+                    edge,
+                    seconds_remaining
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _skip_values(skip),
+            )
+
     def list_trades(self, *, status: str | None = None, limit: int | None = None) -> list[PaperTrade]:
         self.initialize()
         query = "SELECT * FROM paper_trades"
@@ -144,6 +214,24 @@ class SQLiteLedger:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [_trade_from_row(row) for row in rows]
+
+    def list_signal_skips(self, *, limit: int | None = None) -> list[SkippedSignalRecord]:
+        self.initialize()
+        query = "SELECT * FROM paper_signal_skips ORDER BY created_at_utc DESC"
+        params: list[Any] = []
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_skip_from_row(row) for row in rows]
+
+    def count_signal_skips(self) -> int:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM paper_signal_skips").fetchone()
+        return int(row["count"])
 
     def open_trades(self) -> list[PaperTrade]:
         return self.list_trades(status=OPEN)
@@ -258,6 +346,25 @@ def _trade_values(trade: PaperTrade) -> tuple[Any, ...]:
     )
 
 
+def _skip_values(skip: SkippedSignalRecord) -> tuple[Any, ...]:
+    return (
+        skip.skip_id,
+        skip.created_at_utc,
+        skip.market_slug,
+        skip.condition_id,
+        skip.asset,
+        skip.side,
+        skip.outcome,
+        skip.token_id,
+        skip.reason,
+        skip.fair_probability,
+        skip.ask_price,
+        skip.ask_size,
+        skip.edge,
+        skip.seconds_remaining,
+    )
+
+
 def _trade_from_row(row: sqlite3.Row) -> PaperTrade:
     values = {key: row[key] for key in row.keys()}
     return PaperTrade(
@@ -281,6 +388,38 @@ def _trade_from_row(row: sqlite3.Row) -> PaperTrade:
         pnl=float(values["pnl"]),
         reason=str(values["reason"]),
     )
+
+
+def _skip_from_row(row: sqlite3.Row) -> SkippedSignalRecord:
+    values = {key: row[key] for key in row.keys()}
+    return SkippedSignalRecord(
+        skip_id=str(values["skip_id"]),
+        created_at_utc=str(values["created_at_utc"]),
+        market_slug=str(values["market_slug"]),
+        condition_id=str(values["condition_id"]),
+        asset=str(values["asset"]),
+        side=_optional_text(values["side"]),
+        outcome=_optional_text(values["outcome"]),
+        token_id=_optional_text(values["token_id"]),
+        reason=str(values["reason"]),
+        fair_probability=_optional_float(values["fair_probability"]),
+        ask_price=_optional_float(values["ask_price"]),
+        ask_size=_optional_float(values["ask_size"]),
+        edge=_optional_float(values["edge"]),
+        seconds_remaining=_optional_float(values["seconds_remaining"]),
+    )
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def save_all(ledger: SQLiteLedger, trades: Iterable[PaperTrade]) -> None:
