@@ -82,6 +82,29 @@ def test_ledger_open_trades_and_summary(tmp_path) -> None:
     assert summary.win_rate == 0.5
 
 
+def test_ledger_updates_trade_resolution(tmp_path) -> None:
+    store = ledger.SQLiteLedger(tmp_path / "paper_trades.sqlite")
+    store.record_trade(make_trade(paper_size=12.5, paper_cost=10.0))
+
+    store.update_resolution(
+        trade_id="trade-1",
+        status=ledger.WON,
+        resolved_at_utc="2026-07-06T12:05:00Z",
+        payout=12.5,
+        pnl=2.5,
+        reason="resolved winner=Up",
+    )
+
+    trade = store.get_trade("trade-1")
+
+    assert trade is not None
+    assert trade.status == ledger.WON
+    assert trade.resolved_at_utc == "2026-07-06T12:05:00Z"
+    assert trade.payout == 12.5
+    assert trade.pnl == 2.5
+    assert trade.reason == "resolved winner=Up"
+
+
 def test_empty_ledger_summary_creates_database(tmp_path) -> None:
     db_path = tmp_path / "nested" / "paper_trades.sqlite"
 

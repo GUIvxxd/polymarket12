@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from polybot import __version__
-from polybot import clob, discovery, ledger, price_feed
+from polybot import clob, discovery, ledger, price_feed, resolver
 from polybot.config import BotConfig
 from polybot.gamma import GammaClient
 
@@ -90,6 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(BotConfig().db_path),
         help="SQLite ledger path.",
     )
+
+    resolve_parser = subparsers.add_parser(
+        "resolve",
+        help="Resolve OPEN paper trades using public market data.",
+    )
+    resolve_parser.add_argument(
+        "--db",
+        default=str(BotConfig().db_path),
+        help="SQLite ledger path.",
+    )
     return parser
 
 
@@ -150,6 +160,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_ledger_summary(summary)
             return 0
         parser.print_help()
+        return 0
+
+    if args.command == "resolve":
+        store = ledger.SQLiteLedger(Path(args.db))
+        summary = resolver.PaperTradeResolver(store, GammaClient()).resolve_open_trades()
+        _print_resolver_summary(summary)
         return 0
 
     parser.print_help()
@@ -303,6 +319,60 @@ def _print_ledger_summary(summary: ledger.LedgerSummary) -> None:
 
 def _fmt_money(value: float) -> str:
     return f"${value:.2f}"
+
+
+def _print_resolver_summary(summary: resolver.ResolverRunSummary) -> None:
+    rows = [
+        ("checked", str(summary.checked)),
+        ("resolved", str(summary.resolved)),
+        ("won", str(summary.won)),
+        ("lost", str(summary.lost)),
+        ("unresolved", str(summary.unresolved)),
+    ]
+    widths = [
+        max(len(str(row[index])) for row in (("metric", "value"), *rows))
+        for index in range(2)
+    ]
+    print("metric".ljust(widths[0]) + " | " + "value".ljust(widths[1]))
+    print("-" * widths[0] + "-+-" + "-" * widths[1])
+    for metric, value in rows:
+        print(metric.ljust(widths[0]) + " | " + value.ljust(widths[1]))
+
+    if not summary.results:
+        return
+
+    print()
+    result_headers = ("trade", "market", "status", "winner", "payout", "pnl", "reason")
+    result_rows = [
+        (
+            result.trade_id,
+            result.market_slug,
+            result.status,
+            result.winning_outcome or "",
+            _fmt_money(result.payout),
+            _fmt_money(result.pnl),
+            result.reason,
+        )
+        for result in summary.results
+    ]
+    result_widths = [
+        max(len(str(row[index])) for row in (result_headers, *result_rows))
+        for index in range(len(result_headers))
+    ]
+    print(
+        " | ".join(
+            header.ljust(result_widths[index])
+            for index, header in enumerate(result_headers)
+        )
+    )
+    print("-+-".join("-" * width for width in result_widths))
+    for row in result_rows:
+        print(
+            " | ".join(
+                str(value).ljust(result_widths[index])
+                for index, value in enumerate(row)
+            )
+        )
 
 
 if __name__ == "__main__":

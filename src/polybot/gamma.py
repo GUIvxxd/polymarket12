@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -49,6 +50,16 @@ class GammaClient:
         payload = self._get_json("/public-search", params=params)
         return payload if isinstance(payload, dict) else {"results": payload}
 
+    def fetch_market_by_slug(self, slug: str) -> dict[str, Any] | None:
+        encoded_slug = quote(slug, safe="")
+        try:
+            payload = self._get_json(f"/markets/slug/{encoded_slug}", params={})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return payload if isinstance(payload, dict) else None
+
     def _get_json(self, path: str, *, params: Mapping[str, Any]) -> Any:
         with httpx.Client(
             base_url=self.base_url,
@@ -69,4 +80,3 @@ def _coerce_list(payload: Any) -> list[dict[str, Any]]:
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
     return []
-

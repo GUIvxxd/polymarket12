@@ -63,3 +63,27 @@ def test_gamma_client_public_search_normalizes_dict_response(monkeypatch) -> Non
 
     assert payload == {"events": [{"id": "event-1"}]}
 
+
+def test_gamma_client_fetches_market_by_slug(monkeypatch) -> None:
+    calls = []
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def get(self, path, *, params):
+            calls.append(("get", path, params))
+            return FakeResponse({"slug": "btc-updown-5m-1"})
+
+    monkeypatch.setattr(gamma.httpx, "Client", FakeHttpClient)
+
+    market = gamma.GammaClient().fetch_market_by_slug("btc-updown-5m-1")
+
+    assert market == {"slug": "btc-updown-5m-1"}
+    assert calls[1] == ("get", "/markets/slug/btc-updown-5m-1", {})

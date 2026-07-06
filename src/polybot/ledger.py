@@ -157,6 +157,47 @@ class SQLiteLedger:
             ).fetchone()
         return _trade_from_row(row) if row is not None else None
 
+    def update_resolution(
+        self,
+        *,
+        trade_id: str,
+        status: str,
+        resolved_at_utc: str,
+        payout: float,
+        pnl: float,
+        reason: str | None = None,
+    ) -> None:
+        if status not in {WON, LOST}:
+            raise ValueError(f"Resolution status must be {WON} or {LOST}.")
+
+        self.initialize()
+        with self._connect() as connection:
+            if reason is None:
+                connection.execute(
+                    """
+                    UPDATE paper_trades
+                    SET status = ?,
+                        resolved_at_utc = ?,
+                        payout = ?,
+                        pnl = ?
+                    WHERE trade_id = ?
+                    """,
+                    (status, resolved_at_utc, payout, pnl, trade_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE paper_trades
+                    SET status = ?,
+                        resolved_at_utc = ?,
+                        payout = ?,
+                        pnl = ?,
+                        reason = ?
+                    WHERE trade_id = ?
+                    """,
+                    (status, resolved_at_utc, payout, pnl, reason, trade_id),
+                )
+
     def summarize(self) -> LedgerSummary:
         self.initialize()
         with self._connect() as connection:
@@ -245,4 +286,3 @@ def _trade_from_row(row: sqlite3.Row) -> PaperTrade:
 def save_all(ledger: SQLiteLedger, trades: Iterable[PaperTrade]) -> None:
     for trade in trades:
         ledger.record_trade(trade)
-
