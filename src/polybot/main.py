@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from polybot import __version__
-from polybot import clob, discovery, ledger, price_feed, resolver
+from polybot import clob, dashboard, discovery, ledger, live, price_feed, resolver
 from polybot.config import BotConfig
 from polybot.gamma import GammaClient
 
@@ -100,6 +100,56 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(BotConfig().db_path),
         help="SQLite ledger path.",
     )
+
+    run_parser = subparsers.add_parser(
+        "run-paper",
+        help="Run the live paper-trading loop.",
+    )
+    run_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=["BTC", "ETH"],
+        choices=tuple(symbol.lower() for symbol in live.SUPPORTED_LOOP_SYMBOLS)
+        + live.SUPPORTED_LOOP_SYMBOLS,
+        help="Crypto symbols to scan.",
+    )
+    run_parser.add_argument("--stake", type=float, default=10.0, help="Paper stake per trade.")
+    run_parser.add_argument("--min-edge", type=float, default=0.08, help="Minimum signal edge.")
+    run_parser.add_argument(
+        "--min-edge-after-slippage",
+        type=float,
+        default=0.05,
+        help="Minimum simulated edge after slippage.",
+    )
+    run_parser.add_argument(
+        "--slippage-cents",
+        type=float,
+        default=0.02,
+        help="Simulated slippage added to visible ask.",
+    )
+    run_parser.add_argument(
+        "--latency-ms",
+        type=int,
+        default=1500,
+        help="Simulated execution latency recorded in the ledger.",
+    )
+    run_parser.add_argument("--min-liquidity", type=float, default=5.0)
+    run_parser.add_argument("--min-seconds", type=float, default=0.0)
+    run_parser.add_argument("--max-seconds", type=float, default=900.0)
+    run_parser.add_argument("--min-bps-distance", type=float, default=5.0)
+    run_parser.add_argument("--limit", type=int, default=10, help="Markets per symbol.")
+    run_parser.add_argument("--interval", type=float, default=3.0, help="Seconds between loops.")
+    run_parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="Number of loop iterations. Omit to run until interrupted.",
+    )
+    run_parser.add_argument(
+        "--db",
+        default=str(BotConfig().db_path),
+        help="SQLite ledger path.",
+    )
     return parser
 
 
@@ -166,6 +216,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         store = ledger.SQLiteLedger(Path(args.db))
         summary = resolver.PaperTradeResolver(store, GammaClient()).resolve_open_trades()
         _print_resolver_summary(summary)
+        return 0
+
+    if args.command == "run-paper":
+        runner = live.LivePaperRunner(
+            live.LivePaperConfig(
+                symbols=live.normalize_loop_symbols(args.symbols),
+                db_path=Path(args.db),
+                stake=args.stake,
+                min_edge=args.min_edge,
+                min_edge_after_slippage=args.min_edge_after_slippage,
+                slippage_cents=args.slippage_cents,
+                latency_ms=args.latency_ms,
+                min_liquidity=args.min_liquidity,
+                min_seconds_remaining=args.min_seconds,
+                max_seconds_remaining=args.max_seconds,
+                min_bps_distance=args.min_bps_distance,
+                market_limit=args.limit,
+                interval_seconds=args.interval,
+                iterations=args.iterations,
+            )
+        )
+        terminal_dashboard = dashboard.PaperDashboard()
+        try:
+            runner.run(on_iteration=terminal_dashboard.render)
+        except KeyboardInterrupt:
+            print("Stopped paper loop.")
         return 0
 
     parser.print_help()
