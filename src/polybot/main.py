@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 
 from polybot import __version__
-from polybot import clob, discovery, price_feed
+from polybot import clob, discovery, ledger, price_feed
 from polybot.config import BotConfig
 from polybot.gamma import GammaClient
 
@@ -74,6 +75,21 @@ def build_parser() -> argparse.ArgumentParser:
         + price_feed.SUPPORTED_SYMBOLS,
         help="Crypto symbols to fetch, for example BTC ETH.",
     )
+
+    ledger_parser = subparsers.add_parser(
+        "ledger",
+        help="Inspect the local paper-trading ledger.",
+    )
+    ledger_subparsers = ledger_parser.add_subparsers(dest="ledger_command")
+    summary_parser = ledger_subparsers.add_parser(
+        "summary",
+        help="Show paper-trading ledger totals.",
+    )
+    summary_parser.add_argument(
+        "--db",
+        default=str(BotConfig().db_path),
+        help="SQLite ledger path.",
+    )
     return parser
 
 
@@ -126,6 +142,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         for symbol in args.symbols:
             points.append(feed.get_price(symbol))
         _print_price_table(points)
+        return 0
+
+    if args.command == "ledger":
+        if args.ledger_command == "summary":
+            summary = ledger.SQLiteLedger(Path(args.db)).summarize()
+            _print_ledger_summary(summary)
+            return 0
+        parser.print_help()
         return 0
 
     parser.print_help()
@@ -253,6 +277,32 @@ def _print_price_table(points: Sequence[price_feed.PricePoint]) -> None:
     print("-+-".join("-" * width for width in widths))
     for row in rows:
         print(" | ".join(str(value).ljust(widths[index]) for index, value in enumerate(row)))
+
+
+def _print_ledger_summary(summary: ledger.LedgerSummary) -> None:
+    rows = [
+        ("total trades", str(summary.total_trades)),
+        ("open trades", str(summary.open_trades)),
+        ("won trades", str(summary.won_trades)),
+        ("lost trades", str(summary.lost_trades)),
+        ("cancelled trades", str(summary.cancelled_trades)),
+        ("win rate", f"{summary.win_rate:.2%}"),
+        ("realized pnl", _fmt_money(summary.realized_pnl)),
+        ("open risk", _fmt_money(summary.open_risk)),
+        ("total cost", _fmt_money(summary.total_cost)),
+    ]
+    widths = [
+        max(len(str(row[index])) for row in (("metric", "value"), *rows))
+        for index in range(2)
+    ]
+    print("metric".ljust(widths[0]) + " | " + "value".ljust(widths[1]))
+    print("-" * widths[0] + "-+-" + "-" * widths[1])
+    for metric, value in rows:
+        print(metric.ljust(widths[0]) + " | " + value.ljust(widths[1]))
+
+
+def _fmt_money(value: float) -> str:
+    return f"${value:.2f}"
 
 
 if __name__ == "__main__":
